@@ -482,7 +482,7 @@ func (s *Source) broadcastSelected(raw []byte, cut bool, external *aspResponse) 
 	// is as often a powered speaker in the same room (AUX) as headphones, and where nothing in the room
 	// hears the playback the filter finds no echo and passes the microphone through.
 	if s.canceling && s.cancel != nil {
-		if canceled := s.cancel.apply(raw, cancelInput(s.mixer, mics, frame)); canceled != nil {
+		if canceled := s.cancel.apply(raw, cancelInput(s.mixer, mics, frame), mics); canceled != nil {
 			frame = canceled
 		}
 	}
@@ -517,6 +517,18 @@ func (s *Source) broadcastSelected(raw []byte, cut bool, external *aspResponse) 
 		s.wasDenoising = false
 	}
 
+	// While the speaker plays, the wake engine gets the frame before leveling: the leveler adapts to the
+	// echo residual and lifts it to speech level, which buried a wake word said over a reply (on a Spot
+	// it scored 0.00 leveled and about 0.9 not). Requests stay leveled.
+	var unleveled []int16
+	if external == nil && s.canceling && s.cancel != nil && s.cancel.active.Load() {
+		if len(s.cancel.wake) == len(frame) {
+			unleveled = append([]int16(nil), s.cancel.wake...)
+		} else {
+			unleveled = append([]int16(nil), frame...)
+		}
+	}
+
 	// Turning leveling off throws away what it learned, so a room it has adapted badly to is
 	// recovered by switching it off and on rather than by restarting anything.
 	on := s.leveling.Load()
@@ -542,8 +554,12 @@ func (s *Source) broadcastSelected(raw []byte, cut bool, external *aspResponse) 
 	spectrum.Mic.Push(frame)
 
 	for _, l := range s.listeners {
+		f := frame
+		if unleveled != nil && l.name == "wake" {
+			f = unleveled
+		}
 		select {
-		case l.ch <- frame:
+		case l.ch <- f:
 		default:
 			l.dropped++
 			s.dropped.Add(1)

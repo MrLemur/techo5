@@ -1,4 +1,4 @@
-//go:build dot && !donut
+//go:build (dot && !donut) || spot
 
 package mic
 
@@ -82,7 +82,7 @@ func replay(t *testing.T, raw []byte, mixer Mixer) replayed {
 		block := raw[off : off+period]
 		mics := Decode(block)
 		frame := mixer.Mix(mics)
-		if canceled := c.apply(block, cancelInput(mixer, mics, frame)); canceled != nil {
+		if canceled := c.apply(block, cancelInput(mixer, mics, frame), mics); canceled != nil {
 			frame = canceled
 		}
 		out = append(out, frame...)

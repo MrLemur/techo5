@@ -13,7 +13,7 @@ import (
 // this enclosure, cancellation rises with every tap available — 16.5 dB at 256, 18.6 at 512, 23.0 at
 // 1024, 27.2 at 2048 — so there is no room-dependent best value to look for, only what the device can
 // afford. This costs 6.4% of a core, and only while something is playing.
-const cancelTaps = 1024
+var cancelTaps = 1024 // var only so replay tests can try others
 
 // cancelTapsJack is the filter's reach while the sound leaves by the headphone jack, 256 ms. A
 // powered speaker on the jack sits across the room, not a few centimeters from the microphones, and
@@ -101,6 +101,15 @@ type canceller struct {
 
 	// hold counts down the samples still to filter after the loopback went quiet. Reader-only.
 	hold int
+
+	// res is the residual echo suppressor after the linear filter (residual.go).
+	res *residual
+
+	// barge is the per-microphone canceller and beamformer used during playback once a voice has
+	// been learned (bargebeam.go).
+	barge *barge
+	// wake is this frame's beamformed audio for the wake word, empty when the beamformer did not run.
+	wake []int16
 }
 
 func newCanceller() *canceller {
@@ -110,7 +119,10 @@ func newCanceller() *canceller {
 		slog.Error("echo cancellation unavailable", "err", err)
 		return nil
 	}
-	c := &canceller{engine: "builtin"}
+	c := &canceller{engine: "builtin", res: newResidual()}
+	if bargeOn {
+		c.barge = newBarge()
+	}
 	c.filter.Store(f)
 	c.adapting.Store(f.Adapting())
 	return c
@@ -180,7 +192,7 @@ func (c *canceller) process(mic, ref []int16) ([]int16, float64, error) {
 
 // apply returns mic, one fixed path (see cancelInput), with the echo removed, or nil when there is
 // nothing playing and the caller should use the mix it already has.
-func (c *canceller) apply(raw []byte, mic []int16) []int16 {
+func (c *canceller) apply(raw []byte, mic []int16, mics [][]int16) []int16 {
 	n := len(mic)
 	if cap(c.ref) < n {
 		c.ref = make([]int16, n)
@@ -195,6 +207,10 @@ func (c *canceller) apply(raw []byte, mic []int16) []int16 {
 		// Still inside the tail of what just played.
 		c.hold -= n
 	default:
+		c.wake = c.wake[:0]
+		if c.barge != nil && mics != nil {
+			c.barge.quiet(mics)
+		}
 		// Nothing to cancel. The filter keeps what it learned: the room has not changed just because
 		// the reply ended, so the next one starts converged rather than from nothing.
 		if c.active.Swap(false) {
@@ -213,6 +229,17 @@ func (c *canceller) apply(raw []byte, mic []int16) []int16 {
 			attrs = append(attrs, "taps", c.filter.Load().Taps()) // WebRTC's canceller has its own
 		}
 		slog.Info("echo cancellation running", attrs...)
+	}
+
+	// The beamformer's output is for the wake word only (wakeFrame): what a request sends to Home
+	// Assistant stays the one cancelled microphone, which speech detection is tuned on.
+	c.wake = c.wake[:0]
+	if c.barge != nil && mics != nil && c.barge.ready() {
+		if cap(c.wake) < n {
+			c.wake = make([]int16, n)
+		}
+		c.wake = c.wake[:n]
+		c.barge.apply(mics, c.ref, c.wake)
 	}
 
 	out, erleDB, err := c.process(mic, c.ref)
@@ -235,6 +262,9 @@ func (c *canceller) apply(raw []byte, mic []int16) []int16 {
 	}
 	c.mono = c.mono[:len(out)]
 	copy(c.mono, out)
+	if resOn {
+		c.res.apply(mic, c.mono)
+	}
 	return c.mono
 }
 
@@ -333,4 +363,13 @@ func (s *Source) SetAdapting(on bool) {
 		s.cancel.adapting.Store(on)
 		s.cancel.filter.Load().SetAdapting(on)
 	}
+}
+
+// LearnVoice tells the barge-in beamformer that a wake word was just heard. With nothing playing it
+// is a clean voice, and its pattern across the microphones is learned.
+func (s *Source) LearnVoice() {
+	if s == nil || s.cancel == nil || s.cancel.barge == nil || s.cancel.active.Load() {
+		return
+	}
+	s.cancel.barge.learnVoice()
 }

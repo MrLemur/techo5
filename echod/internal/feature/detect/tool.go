@@ -44,6 +44,23 @@ func (d *Detector) ProcessAudio(samples []int16) bool {
 	return hit
 }
 
+// Peak feeds samples and reports the highest score the model reached on them, so that a caller can
+// judge it against a threshold of its own rather than the model's cutoff.
+func (d *Detector) Peak(samples []int16) float64 {
+	if d.front == nil {
+		d.det.ProcessAudio(samples)
+		return d.det.SlidingAverage()
+	}
+	f, peak := d.front, 0.0
+	f.buf = append(f.buf, samples...)
+	for len(f.buf) >= f.window {
+		d.det.ProcessFeatures([][]int8{features(f.fe.ProcessFrame(f.buf[:f.window]))})
+		peak = max(peak, d.det.SlidingAverage())
+		f.buf = f.buf[f.step:]
+	}
+	return peak
+}
+
 // SlidingAverage is the model's score: see microwakeword.Detector.
 func (d *Detector) SlidingAverage() float64 { return d.det.SlidingAverage() }
 

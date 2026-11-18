@@ -14,6 +14,7 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/diag"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/mute"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/nearest"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/ring"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/takes"
@@ -311,6 +312,7 @@ func newDetect() *Detect {
 	d.score = newScoreEntity()
 	d.onHA = newOnHAEntities()
 	e.OnScored = func(slot int, peak, _ float64) { d.scored(slot, peak) }
+	nearest.Get().SetConfidence(e.Crossing)
 	d.frames = newFrameEntities()
 	e.OnFrames = d.frames.set
 	// A wake Home Assistant confirmed is a wake, and its score is what says how far under the threshold
@@ -416,6 +418,9 @@ func (d *Detect) Run(ctx context.Context) error {
 		cancel()
 		<-done
 	}()
+	w := newPlayedWatcher(d.engine)
+	speaker.OnPlayed(w.period)
+	go w.run(ctx)
 	return d.engine.Run(ctx)
 }
 

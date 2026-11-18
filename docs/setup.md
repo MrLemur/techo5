@@ -1246,6 +1246,12 @@ Under Settings → **Sound**, or on the device's Assist satellite in Home Assist
   plays and echo cancellation is active, a ringing timer or alarm included. Until you change it, the device keeps the old behavior:
   0.10 below the normal threshold, but no lower than 0.50. Once set, it is independent of the
   normal threshold. The screen sets the first wake word; Home Assistant has one for each assistant.
+
+  On an Echo, which has several microphones (not the Panel, which has one), a wake word said over the
+  device's own reply is heard through a beamformer: each microphone has its own echo canceller, and
+  their outputs are combined towards your voice and away from the speaker. It learns where your voice
+  comes from on the first wake words said in a quiet room, keeps that across restarts, and only runs
+  while the speaker plays. What is sent to Home Assistant after the wake word is not affected.
 - **Wake word on Home Assistant** and **Confirm wake with Home Assistant** (both off by default):
   let Home Assistant's own wake word engine listen as well as the device, or check a wake the device
   wasn't sure of. See [Wake word on Home Assistant](#wake-word-on-home-assistant) below.
@@ -2011,11 +2017,69 @@ How clearly is how far the wake word stood out from that device's own room, so a
 microphones or in a louder room does not win for that alone. Nothing you say during the wait is
 lost: it is sent with the rest. A device that has already answered keeps the turn, even if a device
 that heard you better speaks up a moment later; and a device that could not answer just then (Home
-Assistant out of reach, say) does not take part, so it never silences one that could. If no other
-device answers in time, for whatever reason, the device answers as it would without this, so the
-worst a fault can do is what happened before: two devices hear you and Home Assistant picks the
-faster. A wake word heard by Home Assistant's own engine (above) is settled by Home Assistant as
-before.
+Assistant out of reach, say) does not take part, so it never silences one that could. In the default
+`classic` mode, if no other device answers in time, the device answers as it would without this:
+two devices may answer and Home Assistant picks the faster. A wake word heard by Home Assistant's
+own engine (above) is settled by Home Assistant as before.
+
+When every device in earshot runs a release with this, how clearly still decides first, rounded to the
+nearest dB so two devices that heard you about equally count as a tie. A tie goes to the device that
+heard the louder speech, then to the one whose wake-word engine was surer, then to the device name.
+An older device is compared on how clearly alone, as before.
+
+**Nearest device mode** defaults to `classic` and stays there until you change it. The other mode,
+`device_quorum`, fails closed: if a decision cannot be reached, the wake is dropped rather than
+answered as `classic` would. A fault or a network partition can therefore leave the devices silent
+until it is resolved. All devices that can hear the same wake must use the same mode and house word;
+mixing modes does not coordinate them. Before choosing `device_quorum`, update every device sharing
+the house word to a release that has it. Older devices still work with `classic`. An update never changes
+the mode.
+
+For `device_quorum` there is no list to type. Choose **Device quorum** under **Nearest device** on each
+device's setup page (the Voice tab, below the house word) and give them the same house word. They find each other
+and form one group by themselves:
+
+- A device that has never been in a group watches for one for about ten seconds. If it sees exactly
+  one group it asks that group's membership authority to add it. If it sees none, the device with the
+  lowest stable ID among the new ones creates a one-device group, and the others join it.
+- The group's membership is saved on each device (`nearest-membership/` in the state folder). Every vote
+  needs a majority of the whole group, so a device that is off still counts. A device going out of
+  sight never changes who is a member.
+- Devices are identified by a random ID saved on the device, not by their names or addresses.
+- Every change (adding, removing, replacing the authority) is a numbered step that a majority of the
+  group has to agree to. The steps are kept, so a device that was off catches up one step at a time
+  before it votes again.
+- The **membership authority** adds and removes devices. The **wake coordinator** is elected separately
+  and settles wakes. Losing the authority does not stop wakes while a majority of the group is up; it
+  only stops new devices joining.
+- After a restart, a change or a settings change a device waits out the longest vote it might have given
+  before it takes part again, and wakes are dropped meanwhile.
+- A group of one device answers on its own, with no clock or vote to wait for, but only while it sees
+  no other device with the house word. If it sees one that is not in its group, it drops the wake
+  rather than risk two devices answering.
+- A device that is already answering still reports a wake word it hears. If it heard it best, the
+  others stay quiet; if another device heard it better, the person has moved on and this device ends
+  its own turn.
+- A wake word the device's own speaker says (in a reply, a song or an announcement) is reported as
+  played, and no device answers it.
+- When a device is dropping wakes, the **Nearest device** section says why, for example "waiting for
+  clock sync", "no majority reachable" or "other devices visible but not in group".
+
+When something goes wrong the same section offers: **Replace authority** (needs a majority of the group,
+not the old authority), **Remove device** (a device is never removed for being off or out of
+sight; to remove the authority, replace it first), **Retry pending change** (finishes a change that was
+interrupted), and **Keep this group**. If two groups of one house
+ever meet, for example because two devices were set up at the same time in different parts of the
+network, wakes are dropped until you choose which group to keep. The other group is then retired by a
+majority of its own members; its devices keep a copy of their old record, and each can then **Join the
+kept group**. If the group to retire has no reachable majority, the page lists who is missing and does
+nothing: switch those devices off or take them off the network, then try again. Changing the house word
+does not remove devices from a group.
+
+This runs over plain HTTP on your network, like the rest of Nearest. The house word signs each message
+so that devices without it are ignored, but nothing is encrypted and a device that has the word can
+claim to be any other. Two groups that could never see each other are only noticed once they meet. A
+network fault at the wrong moment can still mean a wake is answered twice or not at all.
 
 **Nearest device window** (100 to 500 ms, 300 to start with) is how long a device waits to hear from
 the others. Every wake word waits this long. Raise it if two devices sometimes both answer, or a

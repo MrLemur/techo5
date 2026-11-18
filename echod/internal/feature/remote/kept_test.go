@@ -74,6 +74,7 @@ var keptByRestore = map[string]keptSetting{
 	"camera_streaming":                 {func(c *config.Config) { c.CamStream.On = true }, func(c config.Config) bool { return c.CamStream.On }},
 	"camera_login_from_ha":             {func(c *config.Config) { c.CamStream.LoginFromHA = true }, func(c config.Config) bool { return c.CamStream.LoginFromHA }},
 	"nearest_device_answers":           {func(c *config.Config) { c.Nearest.Off = true }, func(c config.Config) bool { return c.Nearest.Off }},
+	"nearest_device_mode":              {func(c *config.Config) { c.Nearest.Mode = "device_quorum" }, func(c config.Config) bool { return c.Nearest.Mode == "device_quorum" }},
 	"person_detection":                 {func(c *config.Config) { c.Presence.Person = true }, func(c config.Config) bool { return c.Presence.Person }},
 	"settings_sharing":                 {func(c *config.Config) { c.Share.On = true }, func(c config.Config) bool { return c.Share.On }},
 	"update_automatically":             {func(c *config.Config) { c.Update.AutoInstall = true }, func(c config.Config) bool { return c.Update.AutoInstall }},

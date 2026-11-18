@@ -268,6 +268,16 @@ func (e *Engine) Use(n int, m wake.Model) error {
 	return nil
 }
 
+// Model is the wake word loaded in slot n, if any.
+func (e *Engine) Model(n int) (wake.Model, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if n < 0 || n >= len(e.slots) || !e.slots[n].loaded {
+		return wake.Model{}, false
+	}
+	return e.slots[n].model, true
+}
+
 // Clear switches a slot off.
 func (e *Engine) Clear(n int) {
 	e.mu.Lock()
@@ -641,6 +651,7 @@ func (e *Engine) judge(n int, s *slot, score float64, now time.Time, source *mic
 
 	if e.OnDetect != nil {
 		safe.Go("wake detected", func() { e.OnDetect(n) })
+		safe.Go("barge-in voice", mic.Get().LearnVoice)
 	}
 }
 

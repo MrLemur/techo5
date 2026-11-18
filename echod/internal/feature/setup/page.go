@@ -608,6 +608,7 @@ func (f *Feature) settingsPage(ctx context.Context, w http.ResponseWriter, token
 		replyPlayerSection(w, token)
 		fmt.Fprint(w, `<h3>Calls and announcements</h3>`)
 		houseSection(w, token)
+		nearestSection(w, token)
 		phoneBookSection(w, token)
 		wakeCallSection(w, token)
 		fmt.Fprint(w, `<h3>More</h3>`)

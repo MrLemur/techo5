@@ -1,9 +1,10 @@
-//go:build dot && !donut
+//go:build (dot && !donut) || spot
 
 package mic
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -34,6 +35,15 @@ func TestReplayWakeScores(t *testing.T) {
 	if dir == "" || models == "" {
 		t.Skip("TECHO5_MICBENCH or TECHO5_MODELS not set")
 	}
+	// TECHO5_RES is "off" or "leak,over,floor" for the residual suppressor; TECHO5_TAPS the filter length.
+	if v := os.Getenv("TECHO5_RES"); v == "off" {
+		resOn = false
+	} else if v != "" {
+		fmt.Sscanf(v, "%f,%f,%f", &resLeak, &resOver, &resFloor)
+	}
+	if v := os.Getenv("TECHO5_TAPS"); v != "" {
+		fmt.Sscan(v, &cancelTaps)
+	}
 	id := os.Getenv("TECHO5_WAKE")
 	if id == "" {
 		id = "okay_nabu"
@@ -56,6 +66,9 @@ func TestReplayWakeScores(t *testing.T) {
 		m.Config.ProbabilityCutoff = manifest.Micro.Cutoff
 	}
 	if m.Config.ProbabilityCutoff <= 0 {
+		m.Config.ProbabilityCutoff = 0.90 // ponytail: what the Spot runs with
+	}
+	if m.Config.ProbabilityCutoff <= 0 {
 		t.Fatalf("no probability_cutoff in %s.json", id)
 	}
 	// config.DefaultThreshold is what the daemon ships with; 0.83 is what the Echo Show 5 runs with in
@@ -75,6 +88,7 @@ func TestReplayWakeScores(t *testing.T) {
 			t.Fatal(err)
 		}
 		at := prompts[name]
+		dumpName = name
 		t.Logf("%s (%d prompts)", name, len(at))
 		for _, fe := range []struct {
 			name  string
@@ -110,6 +124,9 @@ func TestReplayWakeScores(t *testing.T) {
 		}
 	}
 }
+
+// dumpName is the take being scored, for TECHO5_DUMP.
+var dumpName string
 
 // promptWindow is how long after a prompt its utterance can end: reaction, "Okay Nabu", and the model's
 // sliding window.
@@ -216,6 +233,24 @@ func scoreWake(t *testing.T, raw []byte, mixer Mixer, m wake.Model) []float64 {
 	}
 	c, l := newCanceller(), newLeveler()
 	setReplayEngine(c)
+	// TECHO5_LEARN is a take of the voice alone (in TECHO5_MICBENCH): the beamformer learns from it
+	// at each of its prompts, the way a quiet-room wake teaches it on the device.
+	if learn := os.Getenv("TECHO5_LEARN"); learn != "" && c.barge != nil {
+		lraw, err := os.ReadFile(filepath.Join(os.Getenv("TECHO5_MICBENCH"), learn+".s24"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := sessionPrompts(t, filepath.Join(os.Getenv("TECHO5_MICBENCH"), "session.log"))[learn]
+		period := FrameSamples * Channels * Bits / 8
+		next := 0
+		for off, f := 0, 0; off+period <= len(lraw); off, f = off+period, f+1 {
+			c.barge.quiet(Decode(lraw[off : off+period]))
+			if next < len(at) && float64(f*FrameSamples)/Rate >= at[next]+1.4 {
+				c.barge.learnVoice()
+				next++
+			}
+		}
+	}
 	// The env is read here because detect imports this package; the step goes by mwwfront.StepMs, as
 	// the daemon's does, so a manifest without one is 20 ms here too.
 	var exact *mwwfront.Frontend
@@ -223,6 +258,12 @@ func scoreWake(t *testing.T, raw []byte, mixer Mixer, m wake.Model) []float64 {
 		exact = mwwfront.New(m.Config.FeaturesStepMs)
 	}
 	var pending []int16
+	// TECHO5_DUMP is a directory: the detector's input is written there as raw 16 kHz mono s16le, one
+	// file per take and mixer, for training a model on what the detector really hears.
+	var dump *os.File
+	if d := os.Getenv("TECHO5_DUMP"); d != "" {
+		dump, _ = os.Create(filepath.Join(d, fmt.Sprintf("%s-%T.s16", dumpName, mixer)))
+	}
 
 	frameBytes := Channels * Bits / 8
 	period := FrameSamples * frameBytes
@@ -231,7 +272,7 @@ func scoreWake(t *testing.T, raw []byte, mixer Mixer, m wake.Model) []float64 {
 		block := raw[off : off+period]
 		mics := Decode(block)
 		frame := mixer.Mix(mics)
-		if canceled := c.apply(block, cancelInput(mixer, mics, frame)); canceled != nil {
+		if canceled := c.apply(block, cancelInput(mixer, mics, frame), mics); canceled != nil {
 			frame = canceled
 		}
 		frame = append([]int16(nil), frame...)
@@ -264,6 +305,12 @@ func scoreWake(t *testing.T, raw []byte, mixer Mixer, m wake.Model) []float64 {
 			}
 		}
 		trace = append(trace, det.SlidingAverage())
+		if dump != nil {
+			binary.Write(dump, binary.LittleEndian, frame)
+		}
+	}
+	if dump != nil {
+		dump.Close()
 	}
 	return trace
 }

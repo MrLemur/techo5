@@ -297,6 +297,14 @@ type ringReading struct {
 	at      time.Time
 }
 
+// playedTap is what OnPlayed was given, if anything.
+var playedTap atomic.Pointer[func(pcm []byte, heardEnd time.Time)]
+
+// OnPlayed hands f every period the speaker sends the card (S16LE, Channels at Rate) with when its last
+// frame will be heard, so that what this device plays can be listened to for a wake word (detect's
+// played.go). f runs on the write loop: it must copy what it keeps and never block.
+func OnPlayed(f func(pcm []byte, heardEnd time.Time)) { playedTap.Store(&f) }
+
 // OutputExtra is what the path adds after the ring: the tuning's limiter looks 2 ms ahead (lib/asp
 // mbcl.go), and the AFE's FIFO and the codec's DAC filters about another. Estimated from the parts,
 // not measured; a room that still sits a few milliseconds off another is where to look first.
@@ -884,9 +892,13 @@ func (p *Player) Run(ctx context.Context) error {
 		w := p.written.Add(period)
 		if err == nil && d >= 0 {
 			p.ring.Store(&ringReading{written: w, frames: int64(d), at: at})
+			// The period's last frame is the card's newest: heard once the ring ahead of it plays.
+			heardEnd := at.Add(time.Duration(d)*time.Second/Rate + OutputExtra)
 			if softRef && echoref.InUse() {
-				// The period's last frame is the card's newest: heard once the ring ahead of it plays.
-				echoref.Push(sent, Rate, at.Add(time.Duration(d)*time.Second/Rate+OutputExtra))
+				echoref.Push(sent, Rate, heardEnd)
+			}
+			if f := playedTap.Load(); f != nil {
+				(*f)(sent, heardEnd)
 			}
 		} else {
 			p.ring.Store(nil)
