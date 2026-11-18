@@ -141,6 +141,8 @@ var registered = []string{
 	"missed_ring",
 	"mute_led_brightness",
 	"nearest_device_answers",
+	"nearest_device_membership",
+	"nearest_device_mode",
 	"nearest_device_offset",
 	"nearest_device_window",
 	"next_alarm",

@@ -24,7 +24,7 @@ func TestCancellerLengthFollowsTheOutput(t *testing.T) {
 	feed := func(playing bool, frames int) {
 		for range frames {
 			raw := rawFrame(n, playing)
-			c.apply(raw, Average{}.Mix(Decode(raw)))
+			c.apply(raw, Average{}.Mix(Decode(raw)), nil)
 			n++
 		}
 	}

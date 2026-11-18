@@ -191,7 +191,7 @@ var tabFor = map[string]string{
 	"sound-play": "sound", "sound-remove": "sound", "sounds": "sound",
 
 	"brain": "voice", "replyplayer": "voice", "realtime": "voice", "listening": "voice",
-	"house": "voice", "phonebook": "voice", "wakecall": "voice", "wakeword-remove": "voice",
+	"house": "voice", "nearest-mode": "voice", "nearest-op": "voice", "phonebook": "voice", "wakecall": "voice", "wakeword-remove": "voice",
 	"wakewords": "voice", "takes": "voice", "history": "voice", "wakeclips": "voice", "wakeclips-test": "voice", "wakeclips-trust": "voice", "wakeclips-keep": "voice",
 
 	"alarm_add": "alarms", "alarm_edit": "alarms", "alarm_prefs": "alarms",

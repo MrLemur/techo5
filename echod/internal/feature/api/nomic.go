@@ -46,6 +46,7 @@ var listeningObjects = map[string]bool{
 	"ambient_noise": true, "ambient_noise_sensor": true, "clap_gesture": true, "clap_sensitivity": true,
 	// feature/nearest: which device answers a wake word heard by several
 	"nearest_device_answers": true, "nearest_device_offset": true, "nearest_device_window": true,
+	"nearest_device_mode": true, "nearest_device_membership": true,
 	// feature/media: the music during a turn, and after a near miss
 	"media_on_turn": true, "media_duck_level": true, "duck_on_near_miss": true,
 	// feature/mute

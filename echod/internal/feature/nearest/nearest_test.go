@@ -6,13 +6,17 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/announce"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/nearest/membership"
 )
 
 const word = "lantern"
@@ -21,15 +25,27 @@ var stateOnce sync.Once
 
 // house is a device taking part, with one other device to ask and the clock and the window in the
 // test's hands. What it would do to the turn is written down instead of done.
+type scheduled struct {
+	at time.Time
+	f  func()
+}
+
 type house struct {
 	n      *Nearest
 	now    time.Time
-	later  []func()
+	later  []scheduled
 	opened []time.Time
 	faint  []time.Time
 	at0    int
 	sent   []claim
 	mine   *pending
+	token  membershipToken // the committed membership seeded by enableCoordinatorRoster
+}
+
+// stamp binds a hand-written claim to the house's committed membership, as contend does.
+func (h *house) stamp(c claim) claim {
+	c.Cluster, c.Epoch, c.Fingerprint = h.token.cluster, h.token.epoch, h.token.fingerprint
+	return c
 }
 
 func newHouse(t *testing.T) *house {
@@ -38,14 +54,21 @@ func newHouse(t *testing.T) *house {
 	if err := config.Set().Home().HouseWord(word); err != nil {
 		t.Fatal(err)
 	}
+	if err := config.Set().Nearest().On(true); err != nil {
+		t.Fatal(err)
+	}
 	if err := config.Set().Nearest().WindowMs(300); err != nil {
 		t.Fatal(err)
 	}
 	if err := config.Set().Nearest().Offset(0); err != nil {
 		t.Fatal(err)
 	}
+	if err := config.Set().Nearest().Mode(modeExisting); err != nil {
+		t.Fatal(err)
+	}
 	h := &house{now: time.Date(2026, 10, 17, 7, 0, 0, 0, time.UTC)}
 	n := build()
+	n.clockNow = func(at time.Time) (time.Time, bool) { return at, true }
 	n.enabled = true
 	n.busy = func() bool { return false }
 	n.canAnswer = func(int) bool { return true }
@@ -55,8 +78,9 @@ func newHouse(t *testing.T) *house {
 	n.onCall = func() bool { return false }
 	n.peers = func() []announce.Peer { return []announce.Peer{{Name: "Kitchen", Address: "192.0.2.1", Port: 8181}} }
 	n.fanout = func(_ []announce.Peer, mine *pending) { h.sent = append(h.sent, mine.claim); h.mine = mine }
+	n.pendingObserver = func(mine *pending) { h.sent = append(h.sent, mine.claim); h.mine = mine }
 	n.now = func() time.Time { return h.now }
-	n.after = func(_ time.Duration, f func()) { h.later = append(h.later, f) }
+	n.after = func(d time.Duration, f func()) { h.later = append(h.later, scheduled{at: h.now.Add(d), f: f}) }
 	n.woke = func(_ int, at time.Time) { h.opened = append(h.opened, at) }
 	n.wokeNow = func(int) { h.at0++ }
 	n.faint = func(_ int, at time.Time) { h.faint = append(h.faint, at) }
@@ -64,13 +88,88 @@ func newHouse(t *testing.T) *house {
 	return h
 }
 
-// wait lets the window go by.
-func (h *house) wait(d time.Duration) {
-	h.now = h.now.Add(d)
-	for _, f := range h.later {
-		f()
+func enableCoordinatorRoster(t *testing.T, h *house, local string, names []string) {
+	t.Helper()
+	config.Started(config.Device{Name: local})
+	if err := config.Set().Nearest().Mode(modeElected); err != nil {
+		t.Fatal(err)
 	}
-	h.later = nil
+	h.seedMembership(t, local, names)
+	var peers []announce.Peer
+	for _, name := range names {
+		if !strings.EqualFold(name, local) {
+			peers = append(peers, announce.Peer{Name: name, Address: "192.0.2.1", Port: 8181})
+		}
+	}
+	h.n.peers = func() []announce.Peer { return peers }
+	h.peersReport(modeElected)
+}
+
+// peersReport records an authenticated status from every current peer in mode, as the status poll
+// would, so the mode-mismatch gate lets a coordinated wake through.
+func (h *house) peersReport(mode string) {
+	for _, peer := range h.n.peers() {
+		h.n.peerStatuses.observe(word, peer, peerStatus{Mode: mode, Enabled: true}, time.Now())
+	}
+}
+
+// seedMembership installs a real committed one-epoch roster through the production store, with each
+// member's lower-case name as its stable ID. Elections then read it exactly as they read a roster built
+// by automatic joining; the join path itself is exercised by TestThreeDevicesJoinAutomatically.
+func (h *house) seedMembership(t *testing.T, local string, names []string) {
+	t.Helper()
+	ids := make([]string, 0, len(names))
+	for _, name := range names {
+		ids = append(ids, strings.ToLower(name))
+	}
+	slices.Sort(ids)
+	rt := newMembershipRuntime(t.TempDir())
+	rt.deviceID = strings.ToLower(local)
+	_, path := rt.paths()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := membership.CreateRoster(path, membership.Roster{Cluster: "test", Epoch: 1, Authority: ids[0], Members: ids})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.store, rt.opened, rt.closed, rt.blocked, rt.cfgKey = store, true, false, "", currentConfigKey()
+	rt.generation = 1
+	rt.onGate = h.n.electionReset
+	h.n.membership = rt
+	snapshot := rt.snapshot()
+	if !snapshot.Ready {
+		t.Fatalf("seeded membership not ready: %q", snapshot.Blocked)
+	}
+	h.token = snapshot.Token
+}
+
+func defaultCoordinatorRoster(t *testing.T, h *house) {
+	enableCoordinatorRoster(t, h, "Office", []string{"Kitchen", "Office", "Echo3", "Echo4", "Echo5"})
+}
+
+// wait advances the fake clock and runs only timers whose deadlines have elapsed.
+func (h *house) wait(d time.Duration) {
+	until := h.now.Add(d)
+	for {
+		next := -1
+		for i := range h.later {
+			if h.later[i].at.After(until) {
+				continue
+			}
+			if next < 0 || h.later[i].at.Before(h.later[next].at) {
+				next = i
+			}
+		}
+		if next < 0 {
+			break
+		}
+		timer := h.later[next]
+		h.later = append(h.later[:next], h.later[next+1:]...)
+		h.now = timer.at
+		timer.f()
+	}
+	h.now = until
 }
 
 // claimFrom is a claim from another device arriving now, and whether it was told the word was answered
@@ -176,6 +275,157 @@ func TestNoAnswerFromTheOthersAnswersAfterTheWindow(t *testing.T) {
 	h.wait(300 * time.Millisecond)
 	if len(h.opened) != 1 || !h.opened[0].Equal(heard) {
 		t.Errorf("after the window with nothing heard: opened %v, want once, at the wake", h.opened)
+	}
+}
+
+// Each device decides on its own deadline. If neither claim reaches its peer before that deadline,
+// both devices open; learning that the other answered afterwards cannot take back either turn.
+func TestTwoDevicesCanOpenBeforeTheirClaimsArrive(t *testing.T) {
+	a, b := newHouse(t), newHouse(t)
+	a.n.peers = func() []announce.Peer { return []announce.Peer{{Name: "Kitchen"}} }
+	b.n.peers = func() []announce.Peer { return []announce.Peer{{Name: "Office"}} }
+	// Each pending claim keeps its own 500ms deadline.
+	if err := config.Set().Nearest().WindowMs(500); err != nil {
+		t.Fatal(err)
+	}
+	a.n.Woke(0)
+	b.n.Woke(0)
+	if len(a.sent) != 1 || len(b.sent) != 1 {
+		t.Fatalf("claims sent: device A %v, device B %v", a.sent, b.sent)
+	}
+
+	// Let each independent deadline fire before delivering either claim.
+	a.wait(500 * time.Millisecond)
+	b.wait(500 * time.Millisecond)
+	if len(a.opened) != 1 || len(b.opened) != 1 {
+		t.Fatalf("before late claims: device A opened %v times, device B %v times", len(a.opened), len(b.opened))
+	}
+
+	if !a.claimFrom("Kitchen", b.sent[0].Score) || !b.claimFrom("Office", a.sent[0].Score) {
+		t.Error("late claims were not told that each device had already answered")
+	}
+	if len(a.opened) != 1 || len(b.opened) != 1 {
+		t.Errorf("late claims changed starts: device A opened %v times, device B %v times", len(a.opened), len(b.opened))
+	}
+}
+
+// A second wake while one is pending has its own election: neither wake is lost when the current
+// claim is replaced, and each timer retains its own heard-at time and slot.
+func TestOverlappingPendingWakesKeepBoth(t *testing.T) {
+	h := newHouse(t)
+	enableCoordinatorRoster(t, h, "Office", []string{"Office", "Kitchen"})
+	h.n.readinessFanout = func(_ []announce.Peer, p *pending, can func() bool, open func(time.Time, float64)) {
+		h.n.mu.Lock()
+		p.readinessComplete = true
+		h.n.mu.Unlock()
+		h.n.decide(p.Word, p, can, open)
+	}
+	var opened []int
+	h.n.woke = func(slot int, _ time.Time) { opened = append(opened, slot) }
+	h.n.Woke(0)
+	h.n.Woke(1)
+	if len(h.sent) != 2 || len(h.later) != 0 {
+		t.Fatalf("claims %d, pending timers %d; want two claims and no fallback timers", len(h.sent), len(h.later))
+	}
+	h.wait(300 * time.Millisecond)
+	if len(opened) != 2 || opened[0] != 0 || opened[1] != 1 {
+		t.Errorf("opened slots %v; want both wake events in order", opened)
+	}
+}
+
+// The test scheduler advances through real deadlines rather than firing every pending timer at once.
+func TestDecisionTimerUsesConfiguredWindowDeadline(t *testing.T) {
+	h := newHouse(t)
+	h.n.Woke(0)
+	if got := h.later[0].at.Sub(h.now); got != 300*time.Millisecond {
+		t.Fatalf("decision delay %v; want configured window %v", got, 300*time.Millisecond)
+	}
+	h.wait(299 * time.Millisecond)
+	if len(h.opened) != 0 {
+		t.Fatal("opened before configured deadline")
+	}
+	h.wait(time.Millisecond)
+	if len(h.opened) != 1 {
+		t.Fatal("did not decide at configured deadline")
+	}
+}
+
+func TestReadinessFailureFailureDoesNotAnswer(t *testing.T) {
+	h := newHouse(t)
+	enableCoordinatorRoster(t, h, "Office", []string{"Office", "Kitchen"})
+	h.n.readinessFanout = func([]announce.Peer, *pending, func() bool, func(time.Time, float64)) {}
+	h.n.Woke(0)
+	h.wait(time.Second)
+	if len(h.opened) != 0 || h.at0 != 0 {
+		t.Fatal("failed readiness caused an answer")
+	}
+	h.n.decide(h.mine.Word, h.mine, func() bool { return true }, func(at time.Time, _ float64) {
+		h.opened = append(h.opened, at)
+	})
+	if len(h.opened) != 0 {
+		t.Fatal("direct decision bypassed readiness")
+	}
+}
+
+func TestElectedModeWithNoPeersDoesNotAnswer(t *testing.T) {
+	h := newHouse(t)
+	enableCoordinatorRoster(t, h, "Office", []string{"Office", "Kitchen"})
+	h.n.peers = func() []announce.Peer { return nil }
+	h.n.Woke(0)
+	h.wait(time.Second)
+	if h.at0 != 0 || len(h.opened) != 0 || len(h.sent) != 0 {
+		t.Fatal("elected mode answered without a peer or an agreed election")
+	}
+}
+
+// The legacy wire protocol identifies a wake only by wake-word text and a random per-device turn.
+// Coordinated mode uses a bounded timestamp group, but nearby same-word events remain ambiguous.
+func TestDistinctSameWordWakeOutsideGroupingBoundIsNotMatched(t *testing.T) {
+	h := newHouse(t)
+	enableCoordinatorRoster(t, h, "Office", []string{"Office", "Kitchen"})
+	h.n.readinessFanout = func(_ []announce.Peer, p *pending, can func() bool, open func(time.Time, float64)) {
+		p.readinessComplete = true
+		h.n.decide(p.Word, p, can, open)
+	}
+	h.n.Woke(0)
+	h.wait(300 * time.Millisecond)
+	if len(h.opened) != 1 {
+		t.Fatal("first wake did not answer")
+	}
+	lateDifferentEvent := claim{From: "Kitchen", Turn: "late", Word: "okay_nabu", Score: 20,
+		Protocol: coordinationProtocolVersion, HeardAt: h.n.claims[0].HeardAt + int64(eventTolerance+time.Millisecond)}
+	if h.n.took(lateDifferentEvent) {
+		t.Fatal("claim outside the fixed event group was marked as already answered")
+	}
+}
+
+// Different wake events within the fixed grouping interval are intentionally ambiguous in this
+// coordinated election; that uncertainty is bounded and observable, not an exactly-once claim.
+func TestDistinctSameWordWakeInsideGroupingBoundRemainsAmbiguous(t *testing.T) {
+	h := newHouse(t)
+	enableCoordinatorRoster(t, h, "Office", []string{"Office", "Kitchen"})
+	h.n.readinessFanout = func(_ []announce.Peer, p *pending, can func() bool, open func(time.Time, float64)) {
+		p.readinessComplete = true
+		h.n.decide(p.Word, p, can, open)
+	}
+	h.n.Woke(0)
+	h.wait(300 * time.Millisecond)
+	lateDifferentEvent := claim{From: "Kitchen", Turn: "late", Word: "okay_nabu", Score: 20,
+		Protocol: coordinationProtocolVersion, HeardAt: h.n.claims[0].HeardAt + int64(eventCollectionWindow/2)}
+	if !h.n.took(lateDifferentEvent) {
+		t.Fatal("test no longer exposes bounded same-word grouping ambiguity")
+	}
+}
+
+func TestLegacyOverlappingPendingWakesKeepOnlyNewest(t *testing.T) {
+	h := newHouse(t)
+	var opened []int
+	h.n.woke = func(slot int, _ time.Time) { opened = append(opened, slot) }
+	h.n.Woke(0)
+	h.n.Woke(1)
+	h.wait(300 * time.Millisecond)
+	if len(opened) != 1 || opened[0] != 1 {
+		t.Errorf("legacy opened slots %v; want only newest slot 1", opened)
 	}
 }
 

@@ -18,6 +18,9 @@ type Nearest struct {
 	// Offset is added to how well it heard the word, in dB, to even out hardware: a device that loses
 	// when spoken to right beside it is raised, one that answers from across the room is lowered.
 	Offset int `json:"offset,omitempty"`
+
+	// Mode is how the devices settle a wake word: "classic" (the default when empty) or "device_quorum".
+	Mode string `json:"mode,omitempty"`
 }
 
 const (
@@ -33,6 +36,15 @@ const (
 
 // Enabled is whether this device takes part.
 func (n Nearest) Enabled() bool { return !n.Off }
+
+// EffectiveMode is the mode in use. Anything but "device_quorum" is classic, so a file naming a mode
+// this release does not know about answers as it always has rather than going quiet.
+func (n Nearest) EffectiveMode() string {
+	if n.Mode == "device_quorum" {
+		return n.Mode
+	}
+	return "classic"
+}
 
 // Window is how long to wait to hear from the others.
 func (n Nearest) Window() time.Duration {
@@ -57,4 +69,8 @@ func (w NearestWriter) WindowMs(ms int) error {
 func (w NearestWriter) Offset(db int) error {
 	db = min(max(db, MinNearestOffset), MaxNearestOffset)
 	return w.st.Update(func(c *Config) { c.Nearest.Offset = db })
+}
+
+func (w NearestWriter) Mode(mode string) error {
+	return w.st.Update(func(c *Config) { c.Nearest.Mode = mode })
 }

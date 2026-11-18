@@ -36,7 +36,7 @@ var readOnly = []string{
 	// New uses of the microphones and the camera: measuring the room, listening for claps, a finger held
 	// on the clock, serving the camera, and which device answers a wake word.
 	"ambient_noise_sensor", "clap_gesture", "clap_sensitivity", "clock_hold_gesture", "camera_streaming", "camera_login_from_ha",
-	"nearest_device_answers", "person_detection",
+	"nearest_device_answers", "nearest_device_mode", "person_detection",
 	// Taking settings from the other devices.
 	"settings_sharing",
 	// Calls, and what may end one or listen during one.
